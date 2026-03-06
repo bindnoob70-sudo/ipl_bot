@@ -565,6 +565,233 @@ def auto_broadcast_worker():
         except:
             time.sleep(60)
 
+# ==================== PAYMENT AUTO-ADD SYSTEM ====================
+# Yeh code user ke recharge requests ko handle karega
+
+# Pending recharges store karne ke liye dictionary
+pending_recharges = {}
+
+@bot.message_handler(commands=['recharge'])
+def recharge_command(message):
+    """Recharge command handler"""
+    msg = (
+        "💳 *RECHARGE - पैसे जमा करें*\n\n"
+        f"📲 *UPI ID:* `{UPI_ID}`\n\n"
+        "*स्टेप्स:*\n"
+        "1️⃣ UPI app खोलो\n"
+        "2️⃣ उपर वाले ID पर पैसे भेजो\n"
+        "3️⃣ *स्क्रीनशॉट यहाँ भेजो*\n"
+        "4️⃣ जितने पैसे भेजे हैं वो नंबर लिखो\n"
+        "5️⃣ एडमिन approve करेगा, balance add हो जाएगा!\n\n"
+        "*बोनस:*\n"
+        "₹100-500 → 5% extra\n"
+        "₹501-2000 → 10% extra\n"
+        "₹2000+ → 15% extra"
+    )
+    bot.reply_to(message, msg, parse_mode="Markdown")
+
+@bot.message_handler(content_types=['photo'])
+def handle_recharge_screenshot(message):
+    """Handle screenshot for recharge"""
+    user_id = str(message.from_user.id)
+    
+    # Store screenshot info
+    pending_recharges[user_id] = {
+        "message_id": message.message_id,
+        "chat_id": message.chat.id,
+        "time": datetime.now(),
+        "step": "screenshot_received"
+    }
+    
+    # Ask for amount
+    markup = telebot.types.ForceReply(selective=True)
+    msg = bot.reply_to(
+        message,
+        "💰 *कितने पैसे भेजे हैं?*\n\n"
+        "जितने पैसे भेजे हैं, वो नंबर लिखो (सिर्फ अंक):\n"
+        "उदाहरण: 500",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+    
+    # Register next step handler
+    bot.register_next_step_handler(msg, process_recharge_amount, user_id)
+
+def process_recharge_amount(message, user_id):
+    """Process the amount user entered"""
+    try:
+        amount = int(message.text.strip())
+        
+        if amount < 10:
+            bot.reply_to(message, "❌ कम से कम ₹10 तो भेजो!")
+            return
+        
+        # Calculate bonus
+        bonus = 0
+        if amount >= 2000:
+            bonus = int(amount * 0.15)  # 15% bonus
+        elif amount >= 501:
+            bonus = int(amount * 0.10)  # 10% bonus
+        elif amount >= 100:
+            bonus = int(amount * 0.05)   # 5% bonus
+        
+        total = amount + bonus
+        
+        # Store recharge request
+        from main import recharge_requests  # Import if needed
+        recharge_requests[user_id] = {
+            "amount": amount,
+            "bonus": bonus,
+            "total": total,
+            "user_name": message.from_user.first_name,
+            "username": message.from_user.username,
+            "time": str(datetime.now())
+        }
+        
+        # Notify all admins
+        for admin in ADMIN_IDS:
+            admin_msg = (
+                f"💰 *नया रिचार्ज रिक्वेस्ट*\n\n"
+                f"👤 *User:* {message.from_user.first_name}\n"
+                f"🆔 *ID:* `{user_id}`\n"
+                f"💵 *भेजा:* ₹{amount}\n"
+                f"🎁 *बोनस:* ₹{bonus}\n"
+                f"💎 *कुल:* ₹{total}\n\n"
+                f"✅ *Approve करने के लिए:*\n"
+                f"`/approve {user_id}`\n\n"
+                f"❌ *Reject करने के लिए:*\n"
+                f"`/reject {user_id}`"
+            )
+            bot.send_message(admin, admin_msg, parse_mode="Markdown")
+        
+        # Confirm to user
+        bot.reply_to(
+            message,
+            f"✅ *रिक्वेस्ट भेज दी गई!*\n\n"
+            f"तूने भेजा: ₹{amount}\n"
+            f"बोनस: ₹{bonus}\n"
+            f"कुल मिलेगा: ₹{total}\n\n"
+            f"⏱ एडमिन 2-5 मिनट में approve करेगा।"
+        )
+        
+    except ValueError:
+        bot.reply_to(message, "❌ सिर्फ अंक लिखो! जैसे: 500")
+    except Exception as e:
+        bot.reply_to(message, f"❌ कुछ गड़बड़ हुई: {str(e)}")
+
+# Dictionary for recharge requests
+recharge_requests = {}
+
+@bot.message_handler(commands=['approve'])
+def approve_recharge(message):
+    """Admin command to approve recharge"""
+    admin_id = str(message.from_user.id)
+    
+    if admin_id not in ADMIN_IDS:
+        bot.reply_to(message, "❌ आप admin नहीं हैं!")
+        return
+    
+    try:
+        target_user = message.text.split()[1]
+        
+        if target_user in recharge_requests:
+            req = recharge_requests[target_user]
+            
+            # Add balance to user
+            if target_user in users:
+                users[target_user]["balance"] += req["total"]
+                users[target_user]["total_deposit"] += req["amount"]
+            else:
+                # Create user if not exists
+                users[target_user] = {
+                    "balance": req["total"],
+                    "team": None,
+                    "total_deposit": req["amount"],
+                    "total_withdrawal": 0,
+                    "total_bets": 0,
+                    "total_wins": 0,
+                    "referrals": 0,
+                    "joined": str(datetime.now())
+                }
+            
+            save_users(users)
+            
+            # Notify user
+            try:
+                bot.send_message(
+                    target_user,
+                    f"✅ *रिचार्ज सफल!*\n\n"
+                    f"₹{req['amount']} + ₹{req['bonus']} बोनस\n"
+                    f"कुल ₹{req['total']} आपके बैलेंस में ऐड हो गए!\n\n"
+                    f"💰 नया बैलेंस: ₹{users[target_user]['balance']}\n\n"
+                    f"अब खेलो! /play 100",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+            
+            # Confirm to admin
+            bot.reply_to(
+                message,
+                f"✅ ₹{req['total']} user {target_user} को ऐड कर दिए!"
+            )
+            
+            # Remove from pending
+            del recharge_requests[target_user]
+            
+        else:
+            bot.reply_to(message, "❌ कोई पेंडिंग रिक्वेस्ट नहीं है इस user की!")
+            
+    except IndexError:
+        bot.reply_to(message, "❌ Format: /approve user_id")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
+@bot.message_handler(commands=['reject'])
+def reject_recharge(message):
+    """Admin command to reject recharge"""
+    admin_id = str(message.from_user.id)
+    
+    if admin_id not in ADMIN_IDS:
+        bot.reply_to(message, "❌ आप admin नहीं हैं!")
+        return
+    
+    try:
+        target_user = message.text.split()[1]
+        
+        if target_user in recharge_requests:
+            req = recharge_requests[target_user]
+            
+            # Notify user
+            try:
+                bot.send_message(
+                    target_user,
+                    f"❌ *रिचार्ज रिजेक्ट!*\n\n"
+                    f"आपका ₹{req['amount']} का रिचार्ज रिजेक्ट कर दिया गया।\n"
+                    f"कारण: पेमेंट वेरिफाई नहीं हो पाया।\n\n"
+                    f"दोबारा स्क्रीनशॉट भेजें /recharge",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+            
+            # Confirm to admin
+            bot.reply_to(
+                message,
+                f"✅ User {target_user} का रिचार्ज रिजेक्ट कर दिया!"
+            )
+            
+            # Remove from pending
+            del recharge_requests[target_user]
+            
+        else:
+            bot.reply_to(message, "❌ कोई पेंडिंग रिक्वेस्ट नहीं है!")
+            
+    except IndexError:
+        bot.reply_to(message, "❌ Format: /reject user_id")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
+
 # ==================== START BOT ====================
 if __name__ == "__main__":
     print("=" * 50)
@@ -583,4 +810,5 @@ if __name__ == "__main__":
     print("✅ Bot is running! Press Ctrl+C to stop")
     print("=" * 50)
     
+
     bot.infinity_polling()
